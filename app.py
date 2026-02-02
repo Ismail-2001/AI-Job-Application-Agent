@@ -23,6 +23,8 @@ if sys.platform == 'win32':
 from utils.deepseek_client import DeepSeekClient
 from utils.document_builder import DocumentBuilder
 from utils.match_calculator import MatchCalculator
+from utils.profile_deduplicator import ProfileDeduplicator
+from utils.linkedin_importer import LinkedInImporter, import_linkedin_profile
 from agents.job_analyzer import JobAnalyzer
 from agents.cv_customizer import CVCustomizer
 from agents.cover_letter_generator import CoverLetterGenerator
@@ -159,6 +161,9 @@ def update_profile():
         if not profile.get('personal_info', {}).get('name'):
             return jsonify({'success': False, 'error': 'Name is required'}), 400
         
+        # Deduplicate before saving
+        profile = ProfileDeduplicator.deduplicate_profile(profile)
+        
         # Save profile
         os.makedirs("data", exist_ok=True)
         with open("data/master_profile.json", 'w', encoding='utf-8') as f:
@@ -167,6 +172,40 @@ def update_profile():
         return jsonify({'success': True, 'message': 'Profile updated successfully'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/linkedin/import', methods=['POST'])
+def import_linkedin():
+    """Import profile from LinkedIn export or URL."""
+    try:
+        data = request.json
+        export_path = data.get('export_path')
+        linkedin_url = data.get('linkedin_url')
+        
+        if not export_path and not linkedin_url:
+            return jsonify({
+                'success': False,
+                'error': 'Either export_path or linkedin_url must be provided'
+            }), 400
+        
+        # Import LinkedIn data
+        profile = import_linkedin_profile(
+            export_path=export_path,
+            linkedin_url=linkedin_url
+        )
+        
+        # Deduplicate imported data
+        profile = ProfileDeduplicator.deduplicate_profile(profile)
+        
+        return jsonify({
+            'success': True,
+            'profile': profile,
+            'message': 'LinkedIn profile imported successfully. Please review and complete any missing information.'
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 @app.route('/api/process', methods=['POST'])
 def process_job():
@@ -197,6 +236,9 @@ def process_job():
         # Load profile
         profile = load_profile()
         
+        # Deduplicate profile first
+        profile = ProfileDeduplicator.deduplicate_profile(profile)
+        
         # Analyze job
         analysis = job_analyzer.analyze(job_description)
         role_title = analysis.get('role_info', {}).get('title', 'Unknown Role')
@@ -207,6 +249,9 @@ def process_job():
         
         # Customize CV
         customized_cv = cv_customizer.customize(profile, analysis)
+        
+        # Remove any repetitive content
+        customized_cv = ProfileDeduplicator.remove_repetitive_content(customized_cv)
         
         # Generate cover letter
         cover_letter_text = cover_letter_generator.generate(profile, analysis)

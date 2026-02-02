@@ -1,12 +1,15 @@
 """
 FastAPI Server for AI Job Agent
-Role: Expose the agentic workflow as a scalable API.
+Role: Expose the agentic workflow as a scalable API with file downloads.
 """
 
 import os
+import uuid
 from typing import Dict, Any
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -26,11 +29,15 @@ app = FastAPI(title="AI Job Application Agent API")
 # Add CORS middleware to allow requests from web interface
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["*"],  # Allow all origins for easier development
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Ensure output directory exists
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Initialize global engines
 api_key = os.getenv("DEEPSEEK_API_KEY")
@@ -63,7 +70,6 @@ async def process_application(request: JobRequest):
         relevant_snippets = rag_engine.retrieve_relevant_experience(keywords)
         
         # 3. Customize with RAG context
-        # Load master profile for base info
         import json
         with open("data/master_profile.json", "r") as f:
             profile = json.load(f)
@@ -71,15 +77,21 @@ async def process_application(request: JobRequest):
         customized_cv = cv_customizer.customize(profile, analysis, relevant_snippets)
         cover_letter = cover_letter_generator.generate(profile, analysis)
 
-        # 4. Generate Files (In production these would go to S3, here we use 'output/')
+        # 4. Generate Files with unique ID for download
         import re
         def sanitize(name): return re.sub(r'[<>:"/\\|?*]', '', str(name)).strip().replace(' ', '_')
         
         role = sanitize(analysis.get('role_info', {}).get('title', 'Job'))
         company = sanitize(analysis.get('role_info', {}).get('company', 'Company'))
         
-        cv_path = f"output/API_CV_{company}_{role}.docx"
-        cl_path = f"output/API_CL_{company}_{role}.docx"
+        # Use unique ID to prevent file conflicts
+        unique_id = str(uuid.uuid4())[:8]
+        
+        cv_filename = f"CV_{company}_{role}_{unique_id}.docx"
+        cl_filename = f"CL_{company}_{role}_{unique_id}.docx"
+        
+        cv_path = os.path.join(OUTPUT_DIR, cv_filename)
+        cl_path = os.path.join(OUTPUT_DIR, cl_filename)
         
         doc_builder.create_cv(customized_cv, cv_path)
         doc_builder.create_cover_letter(cover_letter, profile, cl_path)
@@ -88,12 +100,30 @@ async def process_application(request: JobRequest):
             "success": True,
             "analysis": analysis,
             "files": {
-                "cv": cv_path,
-                "cover_letter": cl_path
+                "cv": cv_filename,
+                "cover_letter": cl_filename
+            },
+            "download_urls": {
+                "cv": f"/download/{cv_filename}",
+                "cover_letter": f"/download/{cl_filename}"
             }
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/download/{filename}")
+async def download_file(filename: str):
+    """Download generated CV or Cover Letter"""
+    file_path = os.path.join(OUTPUT_DIR, filename)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return FileResponse(
+        path=file_path,
+        filename=filename,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
 
 if __name__ == "__main__":
     import uvicorn
