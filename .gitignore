@@ -139,3 +139,7 @@ data/master_profile.json
 !data/master_profile.json.example
 *.docx
 chroma_db/
+local_agent.db
+*.db
+*.db-journal
+*.log

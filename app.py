@@ -8,8 +8,13 @@ import sys
 import json
 import re
 from typing import Tuple
-from flask import Flask, render_template, request, jsonify, send_file, flash
+from flask import Flask, render_template, request, jsonify, send_file, flash, redirect, url_for
+from flask_login import LoginManager, login_user, logout_user, login_required, current_user
+from werkzeug.security import generate_password_hash, check_password_hash
 from dotenv import load_dotenv
+
+# Database Models
+from models import db, User, MasterProfile, JobApplication
 
 # Fix Windows console encoding for emojis
 if sys.platform == 'win32':
@@ -35,6 +40,20 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'dev-secret-key-change-in-production')
 
+# Database Configuration
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///local_agent.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Initialize Extensions
+db.init_app(app)
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login'
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
 # Global variables for initialized components
 client = None
 builder = None
@@ -47,7 +66,18 @@ def initialize_components():
     """Initialize all AI components."""
     global client, builder, match_calculator, job_analyzer, cv_customizer, cover_letter_generator
     
+    # Create DB Tables
+    with app.app_context():
+        db.create_all()
+        # Create default user if not exists
+        if not User.query.filter_by(email='user@example.com').first():
+            print("Creating default user: user@example.com / password")
+            user = User(email='user@example.com', password_hash=generate_password_hash('password'))
+            db.session.add(user)
+            db.session.commit()
+    
     api_key = os.getenv("DEEPSEEK_API_KEY")
+
     if not api_key:
         raise ValueError("DEEPSEEK_API_KEY not found in environment variables")
     
@@ -59,25 +89,59 @@ def initialize_components():
     cover_letter_generator = CoverLetterGenerator(client)
 
 def load_profile(path: str = "data/master_profile.json") -> dict:
-    """Load the master profile JSON file."""
+    """Load profile from DB (auth) or file (legacy)."""
+    # Try DB first
+    if current_user.is_authenticated:
+        mp = MasterProfile.query.filter_by(user_id=current_user.id).first()
+        if mp and mp.profile_json:
+            return mp.profile_json
+            
+    # Fallback/Bootstrapping
     try:
         with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
-    except FileNotFoundError:
-        # Check if template exists
-        template_path = path + ".template"
-        if os.path.exists(template_path):
-            raise FileNotFoundError(
-                f"Profile file not found at {path}. "
-                f"Please run 'python setup_profile.py' to create your profile, "
-                f"or copy '{template_path}' to '{path}' and edit it with your information."
-            )
-        raise FileNotFoundError(
-            f"Profile file not found at {path}. "
-            f"Please run 'python setup_profile.py' to create your profile."
-        )
-    except json.JSONDecodeError:
-        raise ValueError(f"Invalid JSON in {path}")
+    except:
+        return {}
+
+def save_master_profile(profile_data: dict):
+    """Save profile to DB (if auth) and File (backup)."""
+    # Backup to file
+    try:
+        os.makedirs("data", exist_ok=True)
+        with open("data/master_profile.json", 'w', encoding='utf-8') as f:
+            json.dump(profile_data, f, indent=2, ensure_ascii=False)
+    except: pass
+    
+    # Save to DB
+    if current_user.is_authenticated:
+        mp = MasterProfile.query.filter_by(user_id=current_user.id).first()
+        if not mp:
+            mp = MasterProfile(user_id=current_user.id, profile_json=profile_data)
+            db.session.add(mp)
+        else:
+            mp.profile_json = profile_data
+        db.session.commit()
+
+# Auth Routes
+@app.route('/auth/login', methods=['POST'])
+def login_api():
+    data = request.json
+    user = User.query.filter_by(email=data.get('email')).first()
+    if user and check_password_hash(user.password_hash, data.get('password')):
+        login_user(user)
+        return jsonify({'success': True})
+    return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
+
+@app.route('/auth/logout', methods=['POST'])
+@login_required
+def logout_api():
+    logout_user()
+    return jsonify({'success': True})
+
+@app.route('/auth/status')
+def auth_status():
+    return jsonify({'authenticated': current_user.is_authenticated, 
+                   'email': current_user.email if current_user.is_authenticated else None})
 
 def check_profile_setup() -> Tuple[bool, str]:
     """Check if profile is set up and not using template values."""
@@ -147,6 +211,14 @@ def get_profile():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
+        empty_profile = {}
+        save_master_profile(empty_profile)
+        return jsonify({"success": True, "message": "Profile cleared successfully."})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+from utils.schemas import Profile
+
 @app.route('/api/profile', methods=['POST'])
 def update_profile():
     """Update profile from web interface."""
@@ -157,17 +229,18 @@ def update_profile():
         if not profile:
             return jsonify({'success': False, 'error': 'No profile data provided'}), 400
         
-        # Validate required fields
-        if not profile.get('personal_info', {}).get('name'):
-            return jsonify({'success': False, 'error': 'Name is required'}), 400
+        # Pydantic Validation: Ensures entire structure is correct
+        try:
+            profile_obj = Profile.model_validate(profile)
+            profile = profile_obj.model_dump()
+        except Exception as ve:
+            return jsonify({'success': False, 'error': f'Validation Error: {str(ve)}'}), 400
         
         # Deduplicate before saving
         profile = ProfileDeduplicator.deduplicate_profile(profile)
         
         # Save profile
-        os.makedirs("data", exist_ok=True)
-        with open("data/master_profile.json", 'w', encoding='utf-8') as f:
-            json.dump(profile, f, indent=2, ensure_ascii=False)
+        save_master_profile(profile)
         
         return jsonify({'success': True, 'message': 'Profile updated successfully'})
     except Exception as e:
@@ -197,46 +270,17 @@ def import_linkedin():
         # Option 1: Parse raw text with LLM
         if profile_text:
             system_prompt = """You are an expert LinkedIn profile parser.
-            Convert the unstructured profile text into this exact JSON structure:
-            {
-                "personal_info": {
-                    "name": "Full Name",
-                    "email": "Email if found else empty",
-                    "phone": "Phone if found else empty",
-                    "linkedin": "LinkedIn URL if found else empty",
-                    "location": "Location"
-                },
-                "summary": "Professional summary",
-                "skills": {
-                    "Technical": ["List", "of", "skills"],
-                    "Soft Skills": [],
-                    "Tools": []
-                },
-                "experience": [
-                    {
-                        "company": "Company Name",
-                        "title": "Job Title",
-                        "dates": "Start - End",
-                        "location": "Location",
-                        "responsibilities": ["List of key achievements/responsibilities"]
-                    }
-                ],
-                "education": [
-                    {
-                        "school": "School Name",
-                        "degree": "Degree Name",
-                        "dates": "Start - End"
-                    }
-                ],
-                "certifications": ["List of certifications"]
-            }
-            Extract as much information as possible. Infer missing fields if reasonable, otherwise leave empty."""
+            Convert the unstructured profile text into structured JSON matching your provided rules.
+            Extract ALL work experience entries.
+            Convert responsibilities to achievement-focused bullet points."""
             
-            profile = client.generate_json(
-                prompt=f"Parse this LinkedIn profile text:\n\n{profile_text[:15000]}", # Limit length
+            result = client.generate_json(
+                prompt=f"Parse this LinkedIn profile text:\n\n{profile_text[:15000]}", 
                 system_instruction=system_prompt,
                 temperature=0.1
             )
+            # Pydantic Validation
+            profile = Profile.model_validate(result).model_dump()
 
         # Option 2: Import from Export/URL (Legacy)
         else:
@@ -244,6 +288,9 @@ def import_linkedin():
                 export_path=export_path,
                 linkedin_url=linkedin_url
             )
+            # Still validate legacy import
+            profile = Profile.model_validate(profile).model_dump()
+
         
         # Deduplicate imported data
         profile = ProfileDeduplicator.deduplicate_profile(profile)

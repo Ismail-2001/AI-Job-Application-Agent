@@ -8,6 +8,7 @@ import os
 import json
 import re
 from typing import Dict, Any, Optional
+from utils.schemas import Profile
 
 class LinkedInScraper:
     """
@@ -31,23 +32,21 @@ class LinkedInScraper:
         Parse this LinkedIn profile content and extract structured information.
         
         LINKEDIN PROFILE CONTENT:
-        {profile_text[:8000]}  # Limit to avoid token overflow
+        {profile_text[:8000]}
         
         OUTPUT FORMAT (JSON):
         {{
             "personal_info": {{
                 "name": "Full Name",
-                "email": "email if visible or null",
-                "phone": "phone if visible or null", 
+                "email": "email if visible",
+                "phone": "phone if visible", 
                 "linkedin": "LinkedIn URL",
-                "location": "City, Country",
-                "headline": "Professional headline"
+                "location": "City, Country"
             }},
-            "summary": "Professional summary/about section (2-3 sentences)",
+            "summary": "Professional summary/about section",
             "skills": {{
-                "Technical": ["Skill 1", "Skill 2"],
-                "Soft Skills": ["Skill 1", "Skill 2"],
-                "Tools": ["Tool 1", "Tool 2"]
+                "Technical": ["Skill 1"],
+                "Soft Skills": ["Skill 2"]
             }},
             "experience": [
                 {{
@@ -55,10 +54,7 @@ class LinkedInScraper:
                     "title": "Job Title",
                     "dates": "Start - End",
                     "location": "Location",
-                    "responsibilities": [
-                        "Achievement 1",
-                        "Achievement 2"
-                    ]
+                    "responsibilities": ["Task 1"]
                 }}
             ],
             "education": [
@@ -69,46 +65,28 @@ class LinkedInScraper:
                     "dates": "Start - End"
                 }}
             ],
-            "certifications": ["Cert 1", "Cert 2"]
+            "certifications": ["Cert 1"]
         }}
         
         RULES:
         1. Extract ALL work experience entries
-        2. Preserve exact job titles and company names
-        3. Convert responsibilities to achievement-focused bullet points
-        4. If data is not available, use null or empty array
-        5. Return ONLY valid JSON
+        2. Convert responsibilities to achievement-focused bullet points
+        3. If data is not available, use null or empty array
+        4. Return ONLY valid JSON
         """
         
-        return self.llm_client.generate_json(prompt, temperature=0.2)
+        result = self.llm_client.generate_json(prompt, temperature=0.2)
+        
+        # Pydantic Validation
+        return Profile.model_validate(result).model_dump()
     
     def create_master_profile(self, parsed_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Convert parsed LinkedIn data into master_profile.json format.
+        Ensure data is in master_profile format.
         """
-        # Ensure all required fields exist
-        personal_info = parsed_data.get("personal_info", {})
-        
-        master_profile = {
-            "personal_info": {
-                "name": personal_info.get("name", ""),
-                "email": personal_info.get("email", "your.email@example.com"),
-                "phone": personal_info.get("phone", "+1 555-0000"),
-                "linkedin": personal_info.get("linkedin", ""),
-                "location": personal_info.get("location", "")
-            },
-            "summary": parsed_data.get("summary", ""),
-            "skills": parsed_data.get("skills", {
-                "Technical": [],
-                "Soft Skills": [],
-                "Tools": []
-            }),
-            "experience": parsed_data.get("experience", []),
-            "education": parsed_data.get("education", []),
-            "certifications": parsed_data.get("certifications", [])
-        }
-        
-        return master_profile
+        # Since parse_profile_text already validates using Profile, 
+        # this is now just a pass-through or final check.
+        return Profile.model_validate(parsed_data).model_dump()
     
     def save_master_profile(self, profile: Dict[str, Any], path: str = "data/master_profile.json"):
         """Save the profile to file"""
@@ -116,6 +94,7 @@ class LinkedInScraper:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(profile, f, indent=2, ensure_ascii=False)
         return path
+
 
 
 def import_from_linkedin_text(profile_text: str, llm_client) -> Dict[str, Any]:
