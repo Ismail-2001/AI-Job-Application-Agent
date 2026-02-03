@@ -33,6 +33,8 @@ from utils.linkedin_importer import LinkedInImporter, import_linkedin_profile
 from agents.job_analyzer import JobAnalyzer
 from agents.cv_customizer import CVCustomizer
 from agents.cover_letter_generator import CoverLetterGenerator
+from agents.company_researcher import CompanyResearcher
+from utils.workflow import JobWorkflowManager
 
 # Load environment variables
 load_dotenv()
@@ -61,10 +63,13 @@ match_calculator = None
 job_analyzer = None
 cv_customizer = None
 cover_letter_generator = None
+company_researcher = None
+workflow_manager = None
+event_bus = None # Initialize event bus globally
 
 def initialize_components():
     """Initialize all AI components."""
-    global client, builder, match_calculator, job_analyzer, cv_customizer, cover_letter_generator
+    global client, builder, match_calculator, job_analyzer, cv_customizer, cover_letter_generator, company_researcher, workflow_manager, event_bus
     
     # Create DB Tables
     with app.app_context():
@@ -87,6 +92,10 @@ def initialize_components():
     job_analyzer = JobAnalyzer(client)
     cv_customizer = CVCustomizer(client)
     cover_letter_generator = CoverLetterGenerator(client)
+    company_researcher = CompanyResearcher(client)
+    workflow_manager = JobWorkflowManager(
+        job_analyzer, match_calculator, company_researcher, cv_customizer, cover_letter_generator
+    )
 
 def load_profile(path: str = "data/master_profile.json") -> dict:
     """Load profile from DB (auth) or file (legacy)."""
@@ -340,25 +349,18 @@ def process_job():
         # Load profile
         profile = load_profile()
         
-        # Deduplicate profile first
-        profile = ProfileDeduplicator.deduplicate_profile(profile)
+        # Start the event-driven workflow
+        workflow_state = workflow_manager.start_workflow(job_description, profile)
         
-        # Analyze job
-        analysis = job_analyzer.analyze(job_description)
+        # Extract data from state (Wait, for sync response we still need the data)
+        analysis = workflow_state["analysis"]
+        match_data = workflow_state["match_data"]
+        
         role_title = analysis.get('role_info', {}).get('title', 'Unknown Role')
         company = analysis.get('role_info', {}).get('company', 'Unknown Company')
         
-        # Calculate match score
-        match_data = match_calculator.calculate_match_score(profile, analysis)
-        
-        # Customize CV
-        customized_cv = cv_customizer.customize(profile, analysis)
-        
-        # Remove any repetitive content
-        customized_cv = ProfileDeduplicator.remove_repetitive_content(customized_cv)
-        
-        # Generate cover letter
-        cover_letter_text = cover_letter_generator.generate(profile, analysis)
+        # Finalize documents using gathered context
+        customized_cv, cover_letter_text = workflow_manager.finalize_documents()
         
         # Generate documents
         os.makedirs("output", exist_ok=True)
@@ -368,7 +370,7 @@ def process_job():
         cv_filename = f"output/CV_{safe_company}_{safe_title}.docx"
         cl_filename = f"output/CL_{safe_company}_{safe_title}.docx"
         
-        # Create documents (reuse builder but create new instances for each)
+        # Create documents
         cv_builder = DocumentBuilder()
         cv_builder.create_cv(customized_cv, cv_filename)
         
@@ -382,7 +384,8 @@ def process_job():
             'match_score': match_data,
             'cv_file': cv_filename,
             'cover_letter_file': cl_filename,
-            'analysis': analysis
+            'analysis': analysis,
+            'research': workflow_state["research"]
         })
         
     except ValueError as e:
