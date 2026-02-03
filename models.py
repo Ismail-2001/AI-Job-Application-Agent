@@ -27,5 +27,7 @@ class JobApplication(db.Model):
     company_name = db.Column(db.String(100), nullable=True)
     job_title = db.Column(db.String(100), nullable=True)
     match_score = db.Column(db.Float, default=0.0)
+    cv_path = db.Column(db.String(255), nullable=True)
+    cl_path = db.Column(db.String(255), nullable=True)
     status = db.Column(db.String(20), default='pending') # pending, processing, completed, failed
     created_at = db.Column(db.DateTime, default=datetime.utcnow)

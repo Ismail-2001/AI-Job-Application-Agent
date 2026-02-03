@@ -72,12 +72,19 @@ class JobWorkflowManager:
         """Final generation step using all gathered data."""
         state = self.current_state
         
-        # Customize CV (now enriched with research context)
-        # Note: We can pass research tone to customizer later
-        customized_cv = self.cv_customizer.customize(state["profile"], state["analysis"])
+        # Customize CV (now enriched with research context and RAG if available)
+        customized_cv = self.cv_customizer.customize(
+            state["profile"], 
+            state["analysis"],
+            research=state["research"]
+        )
         customized_cv = ProfileDeduplicator.remove_repetitive_content(customized_cv)
         
         # Generate cover letter
-        cover_letter_text = self.cover_letter_generator.generate(state["profile"], state["analysis"])
+        cover_letter_text = self.cover_letter_generator.generate(
+            state["profile"], 
+            state["analysis"],
+            research=state["research"]
+        )
         
         return customized_cv, cover_letter_text

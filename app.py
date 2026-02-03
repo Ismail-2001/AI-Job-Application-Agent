@@ -229,6 +229,7 @@ def get_profile():
 from utils.schemas import Profile
 
 @app.route('/api/profile', methods=['POST'])
+@login_required
 def update_profile():
     """Update profile from web interface."""
     try:
@@ -256,6 +257,7 @@ def update_profile():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/linkedin/import', methods=['POST'])
+@login_required
 def import_linkedin():
     """Import profile from LinkedIn export or URL."""
     try:
@@ -321,6 +323,7 @@ def import_linkedin():
         }), 500
 
 @app.route('/api/process', methods=['POST'])
+@login_required
 def process_job():
     """Process job description and generate CV/cover letter."""
     try:
@@ -377,6 +380,26 @@ def process_job():
         cl_builder = DocumentBuilder()
         cl_builder.create_cover_letter(cover_letter_text, profile, cl_filename)
         
+        # Persistence: Save to Database
+        if current_user.is_authenticated:
+            try:
+                new_app = JobApplication(
+                    user_id=current_user.id,
+                    job_title=role_title,
+                    company_name=company,
+                    job_description=job_description,
+                    cv_path=cv_filename,
+                    cl_path=cl_filename,
+                    match_score=match_data.get('overall_score', 0.0),
+                    status='completed'
+                )
+                db.session.add(new_app)
+                db.session.commit()
+                print(f"💾 Saved application to database for user {current_user.email}")
+            except Exception as db_err:
+                print(f"⚠️  Database error during persistence: {db_err}")
+                db.session.rollback()
+
         return jsonify({
             'success': True,
             'role_title': role_title,

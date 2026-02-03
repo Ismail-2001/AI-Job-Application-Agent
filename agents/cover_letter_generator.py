@@ -21,21 +21,27 @@ class CoverLetterGenerator:
         You use a professional yet enthusiastic tone.
         """
 
-    def generate(self, profile: Dict[str, Any], job_analysis: Dict[str, Any]) -> str:
+    def generate(self, profile: Dict[str, Any], job_analysis: Dict[str, Any], research: Dict[str, Any] = None) -> str:
         """
         Generate a cover letter.
 
         Args:
             profile: Candidate's master profile
             job_analysis: Analyzed job requirements
+            research: (Optional) Company research context
 
         Returns:
             The body of the cover letter text.
         """
         print("✍️  Writing cover letter...")
         
+        research_context = ""
+        if research:
+            research_context = f"\nCOMPANY RESEARCH CONTEXT:\n{json.dumps(research, indent=2)}\nUse this to deeply personalize Paragraph 2."
+
         prompt = f"""
         Create a compelling cover letter for this job application.
+        {research_context}
 
         CANDIDATE PROFILE:
         {json.dumps(profile, indent=2)}
@@ -45,16 +51,15 @@ class CoverLetterGenerator:
 
         STRUCTURE:
         Paragraph 1 (Opening): Strong hook + excitement about the specific role/company.
-        Paragraph 2 (The Match): Why this company? Connect their mission/needs to candidate's background.
-        Paragraph 3 (The Proof): Highlight the most relevant achievement from the profile that solves a key problem they have.
-        Paragraph 4 (Closing): Call to action, availability, and professional sign-off.
+        Paragraph 2 (The Match): Why THIS company? Connect their mission/culture (from research context if available) to your background.
+        Paragraph 3 (The Proof): Highlight the most relevant achievement from the profile.
+        Paragraph 4 (Closing): Call to action and sign-off.
 
         CRITICAL RULES:
-        1. Tone: Professional, confident, but grounded (not arrogant).
+        1. Tone: {research.get('tone', 'Professional') if research else 'Professional'} (Adapt based on research).
         2. Length: 250-350 words.
-        3. Do NOT include placeholder addresses (header will be handled separately). Just the body.
-        4. Use specific keywords from the job analysis.
-        5. "Show, don't just tell" - use metrics from the profile.
+        3. Use specific keywords from the job analysis.
+        4. "Show, don't just tell" - use metrics from the profile.
         """
 
         # Temperature 0.7 for creativity/personality
