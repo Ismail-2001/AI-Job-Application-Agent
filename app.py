@@ -8,9 +8,11 @@ import sys
 import json
 import re
 from typing import Tuple
-from flask import Flask, render_template, request, jsonify, send_file, flash, redirect, url_for
+from flask import Flask, render_template, request, jsonify, send_file, flash, redirect, url_for, send_from_directory
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
+from flask_wtf.csrf import CSRFProtect
 from werkzeug.security import generate_password_hash, check_password_hash
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
 # Database Models
@@ -41,6 +43,7 @@ load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'dev-secret-key-change-in-production')
+csrf = CSRFProtect(app)
 
 # Database Configuration
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///local_agent.db'
@@ -65,7 +68,8 @@ cv_customizer = None
 cover_letter_generator = None
 company_researcher = None
 workflow_manager = None
-event_bus = None # Initialize event bus globally
+event_bus = None
+executor = ThreadPoolExecutor(max_workers=4)
 
 def initialize_components():
     """Initialize all AI components."""
@@ -322,119 +326,140 @@ def import_linkedin():
             'error': str(e)
         }), 500
 
+def background_process_job(app_instance, job_id, job_description, profile, user_id):
+    """Heavy AI processing run in a background thread."""
+    with app_instance.app_context():
+        try:
+            print(f"🧵 Background task started for Job {job_id}")
+            # Start the event-driven workflow
+            workflow_state = workflow_manager.start_workflow(job_description, profile)
+            
+            analysis = workflow_state["analysis"]
+            match_data = workflow_state["match_data"]
+            role_title = analysis.get('role_info', {}).get('title', 'Unknown Role')
+            company = analysis.get('role_info', {}).get('company', 'Unknown Company')
+            
+            # Finalize documents
+            customized_cv, cover_letter_text = workflow_manager.finalize_documents()
+            
+            # Generate documents
+            os.makedirs("output", exist_ok=True)
+            safe_title = sanitize_filename(role_title)
+            safe_company = sanitize_filename(company)
+            
+            cv_filename = f"output/CV_{safe_company}_{safe_title}.docx"
+            cl_filename = f"output/CL_{safe_company}_{safe_title}.docx"
+            
+            cv_builder = DocumentBuilder()
+            cv_builder.create_cv(customized_cv, cv_filename)
+            
+            cl_builder = DocumentBuilder()
+            cl_builder.create_cover_letter(cover_letter_text, profile, cl_filename)
+            
+            # Update Database
+            job_app = JobApplication.query.get(job_id)
+            if job_app:
+                job_app.job_title = role_title
+                job_app.company_name = company
+                job_app.cv_path = cv_filename
+                job_app.cl_path = cl_filename
+                job_app.match_score = match_data.get('overall_score', 0.0)
+                job_app.status = 'completed'
+                db.session.commit()
+                print(f"✅ Background task completed for Job {job_id}")
+                
+        except Exception as e:
+            print(f"❌ Background task failed for Job {job_id}: {e}")
+            job_app = JobApplication.query.get(job_id)
+            if job_app:
+                job_app.status = 'failed'
+                db.session.commit()
+
 @app.route('/api/process', methods=['POST'])
 @login_required
 def process_job():
-    """Process job description and generate CV/cover letter."""
+    """Initiate async job processing."""
     try:
         data = request.json
         job_description = data.get('job_description', '').strip()
         
         if not job_description or len(job_description) < 50:
-            return jsonify({
-                'success': False,
-                'error': 'Job description is too short. Please provide at least 50 characters.'
-            }), 400
+            return jsonify({'success': False, 'error': 'Job description is too short.'}), 400
         
         # Check profile setup
         profile_ready, message = check_profile_setup()
         if not profile_ready:
-            return jsonify({
-                'success': False,
-                'error': f'Profile not set up: {message}',
-                'profile_required': True
-            }), 400
+            return jsonify({'success': False, 'error': f'Profile not set up: {message}'}), 400
         
-        # Initialize components if not already done
-        if client is None:
-            initialize_components()
-        
-        # Load profile
+        if client is None: initialize_components()
         profile = load_profile()
         
-        # Start the event-driven workflow
-        workflow_state = workflow_manager.start_workflow(job_description, profile)
+        # 1. Create entry in DB with 'processing' status
+        new_app = JobApplication(
+            user_id=current_user.id,
+            job_description=job_description[:500] + "...", # Store snippet
+            status='processing'
+        )
+        db.session.add(new_app)
+        db.session.commit()
         
-        # Extract data from state (Wait, for sync response we still need the data)
-        analysis = workflow_state["analysis"]
-        match_data = workflow_state["match_data"]
+        # 2. Spawn background thread
+        executor.submit(
+            background_process_job, 
+            app._get_current_object(), 
+            new_app.id, 
+            job_description, 
+            profile, 
+            current_user.id
+        )
         
-        role_title = analysis.get('role_info', {}).get('title', 'Unknown Role')
-        company = analysis.get('role_info', {}).get('company', 'Unknown Company')
-        
-        # Finalize documents using gathered context
-        customized_cv, cover_letter_text = workflow_manager.finalize_documents()
-        
-        # Generate documents
-        os.makedirs("output", exist_ok=True)
-        safe_title = sanitize_filename(role_title)
-        safe_company = sanitize_filename(company)
-        
-        cv_filename = f"output/CV_{safe_company}_{safe_title}.docx"
-        cl_filename = f"output/CL_{safe_company}_{safe_title}.docx"
-        
-        # Create documents
-        cv_builder = DocumentBuilder()
-        cv_builder.create_cv(customized_cv, cv_filename)
-        
-        cl_builder = DocumentBuilder()
-        cl_builder.create_cover_letter(cover_letter_text, profile, cl_filename)
-        
-        # Persistence: Save to Database
-        if current_user.is_authenticated:
-            try:
-                new_app = JobApplication(
-                    user_id=current_user.id,
-                    job_title=role_title,
-                    company_name=company,
-                    job_description=job_description,
-                    cv_path=cv_filename,
-                    cl_path=cl_filename,
-                    match_score=match_data.get('overall_score', 0.0),
-                    status='completed'
-                )
-                db.session.add(new_app)
-                db.session.commit()
-                print(f"💾 Saved application to database for user {current_user.email}")
-            except Exception as db_err:
-                print(f"⚠️  Database error during persistence: {db_err}")
-                db.session.rollback()
-
         return jsonify({
             'success': True,
-            'role_title': role_title,
-            'company': company,
-            'match_score': match_data,
-            'cv_file': cv_filename,
-            'cover_letter_file': cl_filename,
-            'analysis': analysis,
-            'research': workflow_state["research"]
+            'message': 'Processing started in background',
+            'job_id': new_app.id
         })
         
-    except ValueError as e:
-        return jsonify({
-            'success': False,
-            'error': f'Configuration error: {str(e)}'
-        }), 400
     except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/job/status/<int:job_id>')
+@login_required
+def get_job_status(job_id):
+    """Poll for job status."""
+    try:
+        job = JobApplication.query.get(job_id)
+        if not job or job.user_id != current_user.id:
+            return jsonify({'success': False, 'error': 'Job not found'}), 404
+            
         return jsonify({
-            'success': False,
-            'error': f'Processing error: {str(e)}'
-        }), 500
+            'success': True,
+            'status': job.status,
+            'job_title': job.job_title,
+            'company': job.company_name,
+            'match_score': job.match_score,
+            'cv_file': job.cv_path,
+            'cover_letter_file': job.cl_path
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/download/<path:filename>')
+@login_required
 def download_file(filename):
-    """Download generated files."""
+    """Download generated files securely."""
     try:
-        # Security: only allow files from output directory
-        if not filename.startswith('output/'):
-            return jsonify({'error': 'Invalid file path'}), 403
+        # Resolve the relative path to avoid directory traversal
+        # We assume files are in 'output' directory
+        directory = os.path.abspath("output")
         
-        file_path = filename
-        if not os.path.exists(file_path):
-            return jsonify({'error': 'File not found'}), 404
+        # Strip 'output/' prefix if present in filename (as it's often passed as output/filename)
+        clean_filename = filename.replace('output/', '').replace('output\\', '')
         
-        return send_file(file_path, as_attachment=True)
+        return send_from_directory(
+            directory,
+            clean_filename,
+            as_attachment=True
+        )
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

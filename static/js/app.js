@@ -1,6 +1,26 @@
 // State
 let currentTab = 'linkedin';
 
+// CSRF Helper
+async function apiFetch(url, options = {}) {
+    const csrfToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+
+    const defaultHeaders = {
+        'X-CSRFToken': csrfToken
+    };
+
+    if (options.body && !(options.body instanceof FormData)) {
+        defaultHeaders['Content-Type'] = 'application/json';
+    }
+
+    options.headers = {
+        ...defaultHeaders,
+        ...options.headers
+    };
+
+    return fetch(url, options);
+}
+
 function switchTab(tab) {
     currentTab = tab;
     // Update Stepper
@@ -39,9 +59,8 @@ function importFromPaste() {
     btn.disabled = true;
     btn.textContent = 'Analyzing Profile...';
 
-    fetch('/api/linkedin/import', {
+    apiFetch('/api/linkedin/import', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profile_text: content })
     })
         .then(res => res.json())
@@ -82,73 +101,101 @@ function processJob() {
     const progBar = document.getElementById('progress-fill');
     const statusText = document.getElementById('loading-status-text');
 
-    const timer = setInterval(() => {
-        progress += Math.random() * 5;
-        if (progress > 95) progress = 95;
+    const progressTimer = setInterval(() => {
+        progress += Math.random() * 2;
+        if (progress > 98) progress = 98;
         progBar.style.width = progress + '%';
+    }, 1000);
 
-        if (progress > 20) statusText.innerText = 'Extracting ATS Keywords...';
-        if (progress > 50) statusText.innerText = 'Matching with your Experience...';
-        if (progress > 80) statusText.innerText = 'Building Professional DOCX...';
-    }, 800);
-
-    fetch('/api/process', {
+    apiFetch('/api/process', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ job_description: jobDesc })
     })
         .then(res => res.json())
         .then(data => {
-            clearInterval(timer);
-            progBar.style.width = '100%';
-
             if (data.success) {
-                setTimeout(() => {
-                    document.getElementById('loading-box').style.display = 'none';
-                    document.getElementById('results-box').style.display = 'block';
-
-                    document.getElementById('result-score').innerText = Math.round(data.match_score.overall_score);
-
-                    // Metrics
-                    const grid = document.getElementById('metrics-grid');
-                    grid.innerHTML = `
-                    <div class="metric-item">
-                        <div class="metric-label">Skills Matched</div>
-                        <div class="metric-value">${data.match_score.required_skills_matched}/${data.match_score.required_skills_total}</div>
-                    </div>
-                    <div class="metric-item">
-                        <div class="metric-label">Keywords Found</div>
-                        <div class="metric-value">${data.match_score.keywords_matched}</div>
-                    </div>
-                `;
-
-                    document.getElementById('dl-cv').href = '/api/download/' + data.cv_file;
-                    document.getElementById('dl-cl').href = '/api/download/' + data.cover_letter_file;
-                    document.getElementById('dl-btn-cv').href = '/api/download/' + data.cv_file;
-                    document.getElementById('dl-btn-cl').href = '/api/download/' + data.cover_letter_file;
-
-
-                    showToast('Application generated successfully!', 'success');
-
-                    // Activate Step 3
-                    setTimeout(() => {
-                        switchTab('download');
-                        document.getElementById('step-3').classList.add('completed');
-                    }, 500);
-                    // Block removed to fix duplication
-                }, 500);
+                const jobId = data.job_id;
+                pollJobStatus(jobId, progressTimer);
             } else {
+                clearInterval(progressTimer);
                 showToast(data.error, 'error');
                 document.getElementById('job-input-view').style.display = 'grid';
                 document.getElementById('loading-box').style.display = 'none';
             }
         })
         .catch(err => {
-            clearInterval(timer);
+            clearInterval(progressTimer);
             showToast('Network error during generation', 'error');
             document.getElementById('job-input-view').style.display = 'grid';
             document.getElementById('loading-box').style.display = 'none';
         });
+}
+
+function pollJobStatus(jobId, progressTimer) {
+    const progBar = document.getElementById('progress-fill');
+    const statusText = document.getElementById('loading-status-text');
+
+    const pollInterval = setInterval(() => {
+        apiFetch(`/api/job/status/${jobId}`)
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    if (data.status === 'completed') {
+                        clearInterval(pollInterval);
+                        clearInterval(progressTimer);
+                        progBar.style.width = '100%';
+                        renderResults(data);
+                    } else if (data.status === 'failed') {
+                        clearInterval(pollInterval);
+                        clearInterval(progressTimer);
+                        showToast('Generation failed. Please try again.', 'error');
+                        document.getElementById('job-input-view').style.display = 'grid';
+                        document.getElementById('loading-box').style.display = 'none';
+                    } else {
+                        // Still processing
+                        statusText.innerText = 'Agents are working on your application...';
+                    }
+                }
+            })
+            .catch(err => {
+                console.error('Polling error:', err);
+            });
+    }, 3000);
+}
+
+function renderResults(data) {
+    setTimeout(() => {
+        document.getElementById('loading-box').style.display = 'none';
+        document.getElementById('results-box').style.display = 'block';
+
+        document.getElementById('result-score').innerText = Math.round(data.match_score);
+
+        // Metrics
+        const grid = document.getElementById('metrics-grid');
+        grid.innerHTML = `
+            <div class="metric-item">
+                <div class="metric-label">Role</div>
+                <div class="metric-value" style="font-size: 14px;">${data.job_title}</div>
+            </div>
+            <div class="metric-item">
+                <div class="metric-label">Company</div>
+                <div class="metric-value" style="font-size: 14px;">${data.company}</div>
+            </div>
+        `;
+
+        document.getElementById('dl-cv').href = '/api/download/' + data.cv_file;
+        document.getElementById('dl-cl').href = '/api/download/' + data.cover_letter_file;
+        document.getElementById('dl-btn-cv').href = '/api/download/' + data.cv_file;
+        document.getElementById('dl-btn-cl').href = '/api/download/' + data.cover_letter_file;
+
+        showToast('Application generated successfully!', 'success');
+
+        // Activate Step 3
+        setTimeout(() => {
+            switchTab('download');
+            document.getElementById('step-3').classList.add('completed');
+        }, 500);
+    }, 800);
 }
 
 // Import Mode Toggle
@@ -170,9 +217,8 @@ function importFromUrl() {
     btn.textContent = 'Scraping... ⏳';
     btn.disabled = true;
 
-    fetch('/api/linkedin/import', {
+    apiFetch('/api/linkedin/import', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ linkedin_url: url })
     })
         .then(res => res.json())
@@ -219,7 +265,7 @@ function importFromPdf() {
     const formData = new FormData();
     formData.append('file', file);
 
-    fetch('/api/import/pdf', {
+    apiFetch('/api/import/pdf', {
         method: 'POST',
         body: formData // No headers for FormData, browser sets multipart
     })
@@ -242,7 +288,7 @@ function importFromPdf() {
 // Profile Management
 function clearProfile() {
     if (confirm('Are you sure you want to disconnect this profile?')) {
-        fetch('/api/profile/clear', { method: 'POST' })
+        apiFetch('/api/profile/clear', { method: 'POST' })
             .then(() => location.reload())
             .catch(() => location.reload()); // Fallback
     }
@@ -276,9 +322,8 @@ function saveProfile() {
         summary: document.getElementById('p-summary').value
     };
 
-    fetch('/api/profile', {
+    apiFetch('/api/profile', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profile: profile })
     })
         .then(res => res.json())
@@ -328,9 +373,8 @@ function loginUser() {
     const email = document.getElementById('login-email').value;
     const password = document.getElementById('login-password').value;
 
-    fetch('/auth/login', {
+    apiFetch('/auth/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password })
     })
         .then(res => res.json())
@@ -345,6 +389,6 @@ function loginUser() {
 }
 
 function logoutUser() {
-    fetch('/auth/logout', { method: 'POST' })
+    apiFetch('/auth/logout', { method: 'POST' })
         .then(() => location.reload());
 }
