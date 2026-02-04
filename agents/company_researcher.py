@@ -1,5 +1,8 @@
 from typing import Dict, Any
 from utils.deepseek_client import DeepSeekClient
+import logging
+
+logger = logging.getLogger(__name__)
 
 class CompanyResearcher:
     """
@@ -17,7 +20,7 @@ class CompanyResearcher:
         if not company_name or company_name == "Unknown":
             return {"culture": "Professional", "values": []}
 
-        print(f"🕵️ Researching company: {company_name}")
+        logger.info(f"🕵️ Researching company: {company_name}")
         
         prompt = f"""
         Provide a brief overview of the company culture, core values, and communication tone for: {company_name}.

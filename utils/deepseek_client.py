@@ -8,6 +8,9 @@ import json
 import os
 from openai import OpenAI, APIError, RateLimitError
 from tenacity import retry, stop_after_attempt, wait_exponential
+import logging
+
+logger = logging.getLogger(__name__)
 
 class DeepSeekClient:
     """
@@ -48,7 +51,7 @@ class DeepSeekClient:
             Generated text string
         """
         try:
-            print(f"🤖 User: Calling DeepSeek ({self.model_name})...")
+            logger.info(f"🤖 User: Calling DeepSeek ({self.model_name})...")
             temperature = config.get("temperature", 0.7) if config else 0.7
             
             messages = []
@@ -65,10 +68,10 @@ class DeepSeekClient:
             return response.choices[0].message.content
             
         except RateLimitError:
-            print("⚠️  Rate limit exceeded. Retrying...")
+            logger.warning("⚠️  Rate limit exceeded. Retrying...")
             raise
         except Exception as e:
-            print(f"❌ DeepSeek API Error: {e}")
+            logger.error(f"❌ DeepSeek API Error: {e}")
             raise
 
     def generate_json(self, prompt: str, system_instruction: str = "", temperature: float = 0.0) -> Dict[str, Any]:
@@ -96,7 +99,7 @@ class DeepSeekClient:
             return self._parse_json_safe(response_text)
             
         except Exception as e:
-            print(f"❌ Failed to generate/parse JSON: {e}")
+            logger.error(f"❌ Failed to generate/parse JSON: {e}")
             raise
 
     def _parse_json_safe(self, text: str) -> Dict[str, Any]:
@@ -121,8 +124,8 @@ class DeepSeekClient:
             
             return json.loads(cleaned.strip())
         except json.JSONDecodeError as e:
-            print(f"❌ JSON Decode Error: {e}")
-            print(f"Raw text start: {text[:100]}")
+            logger.error(f"❌ JSON Decode Error: {e}")
+            logger.debug(f"Raw text start: {text[:100]}")
             # Try to extract JSON from text if it's embedded
             try:
                 start = text.find('{')

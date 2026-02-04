@@ -1,6 +1,9 @@
 from typing import Dict, Any, List
 from utils.deepseek_client import DeepSeekClient
 from utils.schemas import JobAnalysis
+import logging
+
+logger = logging.getLogger(__name__)
 
 class JobAnalyzer:
     """
@@ -37,7 +40,7 @@ class JobAnalyzer:
         """
         Analyze a job description string.
         """
-        print(f"🔍 Analyzing job description ({len(job_description)} chars)...")
+        logger.info(f"🔍 Analyzing job description ({len(job_description)} chars)...")
 
         prompt = f"""
         Analyze this job description and extract comprehensive information:

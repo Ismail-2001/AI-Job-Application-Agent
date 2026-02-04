@@ -13,10 +13,22 @@ from flask_login import LoginManager, login_user, logout_user, login_required, c
 from flask_wtf.csrf import CSRFProtect
 from werkzeug.security import generate_password_hash, check_password_hash
 from concurrent.futures import ThreadPoolExecutor
-from dotenv import load_dotenv
+from flask_migrate import Migrate
+from config import Config
+
+Config.validate() # Ensure env vars are set
 
 # Database Models
 from models import db, User, MasterProfile, JobApplication
+from utils.rag_engine import RAGEngine
+import logging
+
+# Setup professional logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Fix Windows console encoding for emojis
 if sys.platform == 'win32':
@@ -42,12 +54,10 @@ from utils.workflow import JobWorkflowManager
 load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = os.getenv('FLASK_SECRET_KEY', 'dev-secret-key-change-in-production')
-csrf = CSRFProtect(app)
+app.config.from_object(Config)
 
-# Database Configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///local_agent.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+csrf = CSRFProtect(app)
+migrate = Migrate(app, db)
 
 # Initialize Extensions
 db.init_app(app)
@@ -69,36 +79,40 @@ cover_letter_generator = None
 company_researcher = None
 workflow_manager = None
 event_bus = None
+rag_engine = None
 executor = ThreadPoolExecutor(max_workers=4)
 
 def initialize_components():
     """Initialize all AI components."""
-    global client, builder, match_calculator, job_analyzer, cv_customizer, cover_letter_generator, company_researcher, workflow_manager, event_bus
+    global client, builder, match_calculator, job_analyzer, cv_customizer, \
+           cover_letter_generator, company_researcher, workflow_manager, \
+           event_bus, rag_engine
     
     # Create DB Tables
     with app.app_context():
         db.create_all()
         # Create default user if not exists
         if not User.query.filter_by(email='user@example.com').first():
-            print("Creating default user: user@example.com / password")
+            logger.info("Creating default user: user@example.com / password")
             user = User(email='user@example.com', password_hash=generate_password_hash('password'))
             db.session.add(user)
             db.session.commit()
     
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-
-    if not api_key:
-        raise ValueError("DEEPSEEK_API_KEY not found in environment variables")
-    
-    client = DeepSeekClient(api_key=api_key)
+    api_key = Config.DEEPSEEK_API_KEY
+    client = DeepSeekClient(api_key=api_key, model_name=Config.DEEPSEEK_MODEL)
     builder = DocumentBuilder()
     match_calculator = MatchCalculator()
     job_analyzer = JobAnalyzer(client)
     cv_customizer = CVCustomizer(client)
     cover_letter_generator = CoverLetterGenerator(client)
     company_researcher = CompanyResearcher(client)
+    
+    # Initialize Semantic RAG Engine
+    rag_engine = RAGEngine(api_key=Config.GOOGLE_API_KEY)
+    
     workflow_manager = JobWorkflowManager(
-        job_analyzer, match_calculator, company_researcher, cv_customizer, cover_letter_generator
+        job_analyzer, match_calculator, company_researcher, 
+        cv_customizer, cover_letter_generator, rag_engine=rag_engine
     )
 
 def load_profile(path: str = "data/master_profile.json") -> dict:
@@ -330,7 +344,7 @@ def background_process_job(app_instance, job_id, job_description, profile, user_
     """Heavy AI processing run in a background thread."""
     with app_instance.app_context():
         try:
-            print(f"🧵 Background task started for Job {job_id}")
+            logger.info(f"🧵 Background task started for Job {job_id}")
             # Start the event-driven workflow
             workflow_state = workflow_manager.start_workflow(job_description, profile)
             
@@ -343,18 +357,21 @@ def background_process_job(app_instance, job_id, job_description, profile, user_
             customized_cv, cover_letter_text = workflow_manager.finalize_documents()
             
             # Generate documents
-            os.makedirs("output", exist_ok=True)
+            os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
             safe_title = sanitize_filename(role_title)
             safe_company = sanitize_filename(company)
             
-            cv_filename = f"output/CV_{safe_company}_{safe_title}.docx"
-            cl_filename = f"output/CL_{safe_company}_{safe_title}.docx"
+            cv_filename = f"CV_{safe_company}_{safe_title}.docx"
+            cl_filename = f"CL_{safe_company}_{safe_title}.docx"
+            
+            cv_path = os.path.join(Config.OUTPUT_DIR, cv_filename)
+            cl_path = os.path.join(Config.OUTPUT_DIR, cl_filename)
             
             cv_builder = DocumentBuilder()
-            cv_builder.create_cv(customized_cv, cv_filename)
+            cv_builder.create_cv(customized_cv, cv_path)
             
             cl_builder = DocumentBuilder()
-            cl_builder.create_cover_letter(cover_letter_text, profile, cl_filename)
+            cl_builder.create_cover_letter(cover_letter_text, profile, cl_path)
             
             # Update Database
             job_app = JobApplication.query.get(job_id)
@@ -366,10 +383,10 @@ def background_process_job(app_instance, job_id, job_description, profile, user_
                 job_app.match_score = match_data.get('overall_score', 0.0)
                 job_app.status = 'completed'
                 db.session.commit()
-                print(f"✅ Background task completed for Job {job_id}")
+                logger.info(f"✅ Background task completed for Job {job_id}")
                 
         except Exception as e:
-            print(f"❌ Background task failed for Job {job_id}: {e}")
+            logger.error(f"❌ Background task failed for Job {job_id}: {e}")
             job_app = JobApplication.query.get(job_id)
             if job_app:
                 job_app.status = 'failed'
@@ -449,11 +466,10 @@ def download_file(filename):
     """Download generated files securely."""
     try:
         # Resolve the relative path to avoid directory traversal
-        # We assume files are in 'output' directory
-        directory = os.path.abspath("output")
+        directory = os.path.abspath(Config.OUTPUT_DIR)
         
-        # Strip 'output/' prefix if present in filename (as it's often passed as output/filename)
-        clean_filename = filename.replace('output/', '').replace('output\\', '')
+        # Strip prefixes to avoid path manipulation
+        clean_filename = os.path.basename(filename)
         
         return send_from_directory(
             directory,

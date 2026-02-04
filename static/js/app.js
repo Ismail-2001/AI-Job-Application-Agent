@@ -96,6 +96,9 @@ function processJob() {
     document.getElementById('job-input-view').style.display = 'none';
     document.getElementById('loading-box').style.display = 'flex';
     document.getElementById('results-box').style.display = 'none';
+    document.getElementById('job-error-view').style.display = 'none';
+    document.querySelector('.spinner').style.display = 'block';
+    document.getElementById('progress-fill').parentElement.style.display = 'block';
 
     let progress = 0;
     const progBar = document.getElementById('progress-fill');
@@ -115,20 +118,34 @@ function processJob() {
         .then(data => {
             if (data.success) {
                 const jobId = data.job_id;
+                localStorage.setItem('activeJobId', jobId);
                 pollJobStatus(jobId, progressTimer);
             } else {
                 clearInterval(progressTimer);
-                showToast(data.error, 'error');
-                document.getElementById('job-input-view').style.display = 'grid';
-                document.getElementById('loading-box').style.display = 'none';
+                handleProcessError(data.error || 'Processing failed');
             }
         })
         .catch(err => {
             clearInterval(progressTimer);
-            showToast('Network error during generation', 'error');
-            document.getElementById('job-input-view').style.display = 'grid';
-            document.getElementById('loading-box').style.display = 'none';
+            handleProcessError('Network error during generation');
         });
+}
+
+function handleProcessError(msg) {
+    showToast(msg, 'error');
+    document.getElementById('loading-status-text').innerText = 'Generation Error';
+    document.querySelector('.spinner').style.display = 'none';
+    document.getElementById('progress-fill').parentElement.style.display = 'none';
+
+    document.getElementById('job-error-view').style.display = 'block';
+    document.getElementById('job-error-msg').innerText = msg;
+    localStorage.removeItem('activeJobId');
+}
+
+function retryProcessing() {
+    document.getElementById('job-input-view').style.display = 'grid';
+    document.getElementById('loading-box').style.display = 'none';
+    document.getElementById('job-error-view').style.display = 'none';
 }
 
 function pollJobStatus(jobId, progressTimer) {
@@ -142,15 +159,14 @@ function pollJobStatus(jobId, progressTimer) {
                 if (data.success) {
                     if (data.status === 'completed') {
                         clearInterval(pollInterval);
-                        clearInterval(progressTimer);
+                        if (progressTimer) clearInterval(progressTimer);
+                        localStorage.removeItem('activeJobId');
                         progBar.style.width = '100%';
                         renderResults(data);
                     } else if (data.status === 'failed') {
                         clearInterval(pollInterval);
-                        clearInterval(progressTimer);
-                        showToast('Generation failed. Please try again.', 'error');
-                        document.getElementById('job-input-view').style.display = 'grid';
-                        document.getElementById('loading-box').style.display = 'none';
+                        if (progressTimer) clearInterval(progressTimer);
+                        handleProcessError('Generation failed on server. Please try again.');
                     } else {
                         // Still processing
                         statusText.innerText = 'Agents are working on your application...';
@@ -341,8 +357,17 @@ function saveProfile() {
         });
 }
 
-// Scroll Animation Observer
+// Scroll Animation Observer & State Recovery
 document.addEventListener('DOMContentLoaded', () => {
+    // Check for active job
+    const savedJobId = localStorage.getItem('activeJobId');
+    if (savedJobId) {
+        showToast('Resuming your application...', 'info');
+        document.getElementById('job-input-view').style.display = 'none';
+        document.getElementById('loading-box').style.display = 'flex';
+        pollJobStatus(savedJobId);
+    }
+
     const observer = new IntersectionObserver((entries) => {
         entries.forEach(entry => {
             if (entry.isIntersecting) {

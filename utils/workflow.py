@@ -8,12 +8,13 @@ class JobWorkflowManager:
     """
     Orchestrates the job application generation process using an event-driven approach.
     """
-    def __init__(self, job_analyzer, match_calculator, company_researcher, cv_customizer, cover_letter_generator):
+    def __init__(self, job_analyzer, match_calculator, company_researcher, cv_customizer, cover_letter_generator, rag_engine=None):
         self.job_analyzer = job_analyzer
         self.match_calculator = match_calculator
         self.company_researcher = company_researcher
         self.cv_customizer = cv_customizer
         self.cover_letter_generator = cover_letter_generator
+        self.rag_engine = rag_engine
         
         # Internal state for a single "run" (could be improved with run_id)
         self.current_state = {}
@@ -30,7 +31,8 @@ class JobWorkflowManager:
             "profile": ProfileDeduplicator.deduplicate_profile(profile),
             "analysis": None,
             "research": None,
-            "match_data": None
+            "match_data": None,
+            "snippets": []
         }
         
         # Step 1: Analyze
@@ -58,6 +60,12 @@ class JobWorkflowManager:
         self.current_state["match_data"] = match_data
         bus.emit("match_score_ready", match_data)
 
+        # Retrieve snippets for deep customization
+        if self.rag_engine:
+            job_desc = self.current_state["job_description"]
+            snippets = self.rag_engine.retrieve_relevant_experience(job_desc)
+            self.current_state["snippets"] = snippets
+
     def on_research_completed(self, research: Dict[str, Any]):
         """Triggered when company research is finished."""
         # Logic to enrich the final documents
@@ -76,6 +84,7 @@ class JobWorkflowManager:
         customized_cv = self.cv_customizer.customize(
             state["profile"], 
             state["analysis"],
+            relevant_snippets=state.get("snippets", []),
             research=state["research"]
         )
         customized_cv = ProfileDeduplicator.remove_repetitive_content(customized_cv)

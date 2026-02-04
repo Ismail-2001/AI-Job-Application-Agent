@@ -7,6 +7,9 @@ from typing import Dict, Any, List
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+import logging
+
+logger = logging.getLogger(__name__)
 
 class DocumentBuilder:
     """
@@ -68,10 +71,10 @@ class DocumentBuilder:
             
             # Save
             self.doc.save(output_path)
-            print(f"✅ Document saved to: {output_path}")
+            logger.info(f"✅ Document saved to: {output_path}")
 
         except Exception as e:
-            print(f"❌ Failed to create document: {e}")
+            logger.error(f"❌ Failed to create document: {e}")
             raise
 
     def _add_header(self, info: Dict[str, str]):
@@ -202,8 +205,8 @@ class DocumentBuilder:
             
             # Save
             self.doc.save(output_path)
-            print(f"✅ Cover Letter saved to: {output_path}")
+            logger.info(f"✅ Cover Letter saved to: {output_path}")
             
         except Exception as e:
-            print(f"❌ Failed to create cover letter: {e}")
+            logger.error(f"❌ Failed to create cover letter: {e}")
             raise

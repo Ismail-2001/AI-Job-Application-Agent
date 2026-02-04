@@ -171,6 +171,11 @@
                         <div id="progress-fill"
                             style="width:0%; height:100%; background:var(--primary); transition:width 0.3s;"></div>
                     </div>
+
+                    <div id="job-error-view" style="display:none; margin-top:32px; text-align:center;">
+                        <p id="job-error-msg" style="color:var(--error); margin-bottom:16px;"></p>
+                        <button class="btn-try" onclick="retryProcessing()">Try Again 🔄</button>
+                    </div>
                 </div>
 
                 <div id="results-box" style="display:none;">
